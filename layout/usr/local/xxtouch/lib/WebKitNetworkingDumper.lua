@@ -45,7 +45,10 @@ local _item_names = function (host, item)
     if file.exists(host_path) ~= "directory" then
         return {}, false
     end
-    local name, ext = PATH.splitext(item)
+    local name, ext
+    if item then
+        name, ext = PATH.splitext(item)
+    end
     local _, dir = lfs.dir(host_path)
     local first = false
     local tab = {}
@@ -54,19 +57,39 @@ local _item_names = function (host, item)
         if not entry then
             break
         end
-        local f_name, f_ext = PATH.splitext(entry)
-        if f_name then
-            if f_ext == ext and f_name == name then
-                first = true
+        if name and ext then
+            local f_name, f_ext = PATH.splitext(entry)
+            if f_name then
+                if f_ext == ext and f_name == name then
+                    first = true
+                end
+                if f_ext == ext and f_name:find(name .. "-", 1, true) == 1 then
+                    table.insert(tab, entry)
+                end
             end
-            if f_ext == ext and f_name:find(name .. "-", 1, true) == 1 then
-                table.insert(tab, entry)
-            end
+        elseif entry ~= "." and entry ~= ".." then
+            table.insert(tab, entry)
         end
     end
     tab = localized_sort(tab)
     dir:close()
     return tab, first
+end
+_M.hosts = function ()
+    local _, dir = lfs.dir(_M.path)
+    local tab = {}
+    while true do
+        local entry = dir:next()
+        if not entry then
+            break
+        end
+        if entry ~= "." and entry ~= ".." then
+            table.insert(tab, entry)
+        end
+    end
+    tab = localized_sort(tab)
+    dir:close()
+    return tab
 end
 _M.item_paths = function (host, item)
     local host_path = _M.host_path(host)
