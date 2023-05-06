@@ -9,7 +9,7 @@
 - (NSString *)wkValidHost;
 - (NSString *)wkValidPath;
 - (BOOL)wkRuleMatches:(NSArray <NSString *> *)matches;
-- (NSString *)wkSuggestedPathAtRoot:(NSString *)rootPath;
+- (NSString *)wkSuggestedPathAtRoot:(NSString *)rootPath isRequest:(BOOL)isRequest;
 @end
 
 @implementation NSURL (PrivateMatches)
@@ -143,11 +143,13 @@
 	return validPass;
 }
 
-- (NSString *)wkSuggestedPathAtRoot:(NSString *)rootPath
+- (NSString *)wkSuggestedPathAtRoot:(NSString *)rootPath isRequest:(BOOL)isRequest
 {
 	NSString *lastPathComponent = [[self pathComponents] lastObject];
 	if ([[lastPathComponent pathExtension] length] == 0) {
-		lastPathComponent = [lastPathComponent stringByAppendingPathExtension:@"dat"];
+		lastPathComponent = [lastPathComponent stringByAppendingPathExtension:(isRequest ? @"req" : @"resp")];
+	} else if (isRequest) {
+		lastPathComponent = [lastPathComponent stringByAppendingPathExtension:@"req"];
 	}
 	NSFileManager *fileManager = [NSFileManager defaultManager];
 	NSString *fullPath = [rootPath stringByAppendingPathComponent:lastPathComponent];
@@ -184,12 +186,42 @@ NSString *GlobalTaskIdentifierInSession(NSURLSession *session, NSURLSessionTask 
 	return [NSString stringWithFormat:@"%p-%lu", session, [task taskIdentifier]];
 }
 
+static NSString *HostPathForURL(NSURL *url)
+{
+	static NSString *sRootPath = nil;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		NSFileManager *fileManager = [NSFileManager defaultManager];
+		NSURL *cachesURL = [fileManager URLForDirectory:NSCachesDirectory inDomain:NSUserDomainMask appropriateForURL:nil create:YES error:nil];
+		sRootPath = [[cachesURL path] stringByAppendingPathComponent:@"com.apple.WebKit.Networking"];
+		sRootPath = [sRootPath stringByAppendingPathComponent:@"ch.xxtou.webkitnetworkingdumper"];
+		BOOL sRootCreated = [fileManager createDirectoryAtPath:sRootPath withIntermediateDirectories:YES attributes:nil error:nil];
+		if (!sRootCreated) {
+			os_log_error(OS_LOG_DEFAULT, "WKNSD[FS]: Failed to create root path %{public}@", sRootPath);
+		} else {
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[FS]: Root path %{public}@", sRootPath);
+		}
+	});
+
+	NSFileManager *fileManager = [NSFileManager defaultManager];
+	NSString *currentHost = [url host];
+	NSString *hostPath = [sRootPath stringByAppendingPathComponent:currentHost];
+	BOOL sHostCreated = [fileManager createDirectoryAtPath:hostPath withIntermediateDirectories:YES attributes:nil error:nil];
+	if (!sHostCreated) {
+		os_log_error(OS_LOG_DEFAULT, "WKNSD[FS]: Failed to create host path %{public}@", hostPath);
+	} else {
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[FS]: Host path %{public}@", hostPath);
+	}
+
+	return hostPath;
+}
+
 %hook WKNetworkSessionDelegate
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition disposition))completionHandler
 {
 	if (!session || !dataTask || ![response isKindOfClass:[NSHTTPURLResponse class]]) {
-		os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate: Invalid session or response");
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP]: Invalid session or response");
 		%orig;
 		return;
 	}
@@ -197,7 +229,7 @@ NSString *GlobalTaskIdentifierInSession(NSURLSession *session, NSURLSessionTask 
 	NSString *globalIdentifier = GlobalTaskIdentifierInSession(session, dataTask);
 	NSURL *currentURL = response.URL;
 	if (!currentURL) {
-		os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: Invalid URL", globalIdentifier);
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: Invalid URL", globalIdentifier);
 		%orig;
 		return;
 	}
@@ -211,13 +243,13 @@ NSString *GlobalTaskIdentifierInSession(NSURLSession *session, NSURLSessionTask 
 		contentType = @"application/octet-stream";
 
 	pthread_rwlock_rdlock(&mRulesLock);
-	os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: Checking %lu rules", globalIdentifier, mRules.count);
+	os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: Checking %lu rules", globalIdentifier, mRules.count);
 	NSUInteger ruleIndex = 0;
 	for (NSDictionary *mRule in mRules) {
 		ruleIndex++;
 
 		if (![mRule isKindOfClass:[NSDictionary class]]) {
-			os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: Invalid rule #%lu", globalIdentifier, ruleIndex);
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: Invalid rule #%lu", globalIdentifier, ruleIndex);
 			continue;
 		}
 
@@ -226,26 +258,26 @@ NSString *GlobalTaskIdentifierInSession(NSURLSession *session, NSURLSessionTask 
 		BOOL requiresContentTypes = [mRule[@"contentTypes"] isKindOfClass:[NSArray class]];
 
 		if (!requiresMatches && !requiresStatusCodes && !requiresContentTypes) {
-			os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: Rule #%lu does not have any requirements", globalIdentifier, ruleIndex);
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: Rule #%lu does not have any requirements", globalIdentifier, ruleIndex);
 			continue;
 		}
 
 		BOOL validMatches = requiresMatches && [currentURL wkRuleMatches:mRule[@"matches"]];
 		BOOL validStatusCodes = requiresStatusCodes && [mRule[@"statusCodes"] containsObject:@(statusCode)];
-		BOOL validContentType = requiresContentTypes && [mRule[@"contentTypes"] containsObject:contentType];
+		BOOL validContentTypes = requiresContentTypes && [mRule[@"contentTypes"] containsObject:contentType];
 
 		if (requiresMatches && !validMatches) {
-			os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: Rule #%lu does not match url %{public}@", globalIdentifier, ruleIndex, currentURL);
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: Rule #%lu does not match url %{public}@", globalIdentifier, ruleIndex, currentURL);
 			continue;
 		}
 
 		if (requiresStatusCodes && !validStatusCodes) {
-			os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: Rule #%lu does not match status code %ld", globalIdentifier, ruleIndex, statusCode);
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: Rule #%lu does not match status code %ld", globalIdentifier, ruleIndex, statusCode);
 			continue;
 		}
 
-		if (requiresContentTypes && !validContentType) {
-			os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: Rule #%lu does not match content type %{public}@", globalIdentifier, ruleIndex, contentType);
+		if (requiresContentTypes && !validContentTypes) {
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: Rule #%lu does not match content type %{public}@", globalIdentifier, ruleIndex, contentType);
 			continue;
 		}
 
@@ -255,7 +287,7 @@ NSString *GlobalTaskIdentifierInSession(NSURLSession *session, NSURLSessionTask 
 	pthread_rwlock_unlock(&mRulesLock);
 
 	if (!shouldDump) {
-		os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: No rule matched for url %{public}@ statusCode %ld contentType %{public}@", globalIdentifier, currentURL, statusCode, contentType);
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: No rule matched for url %{public}@ statusCode %ld contentType %{public}@", globalIdentifier, currentURL, statusCode, contentType);
 		%orig;
 		return;
 	}
@@ -263,7 +295,7 @@ NSString *GlobalTaskIdentifierInSession(NSURLSession *session, NSURLSessionTask 
 	pthread_mutex_lock(&mDataPoolMutex);
 	NSMutableData *data = [[NSMutableData alloc] init];
 	mDataPool[globalIdentifier] = data;
-	os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: Begin dumping data for url %{public}@", globalIdentifier, currentURL);
+	os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: Begin dumping data for url %{public}@", globalIdentifier, currentURL);
 	pthread_mutex_unlock(&mDataPoolMutex);
 
 	%orig;
@@ -272,7 +304,7 @@ NSString *GlobalTaskIdentifierInSession(NSURLSession *session, NSURLSessionTask 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data
 {
 	if (!session || !dataTask) {
-		os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate: Invalid session");
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP]: Invalid session");
 		%orig;
 		return;
 	}
@@ -283,7 +315,7 @@ NSString *GlobalTaskIdentifierInSession(NSURLSession *session, NSURLSessionTask 
 	NSMutableData *dataPool = mDataPool[globalIdentifier];
 	if (dataPool) {
 		[dataPool appendData:data];
-		os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: Received %lu bytes, %lu bytes in total", globalIdentifier, data.length, dataPool.length);
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: Received %lu bytes, %lu bytes in total", globalIdentifier, data.length, dataPool.length);
 	}
 	pthread_mutex_unlock(&mDataPoolMutex);
 
@@ -293,60 +325,142 @@ NSString *GlobalTaskIdentifierInSession(NSURLSession *session, NSURLSessionTask 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error
 {
 	if (!session || !task) {
-		os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate: Invalid session");
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP]: Invalid session");
 		%orig;
 		return;
 	}
 
 	NSString *globalIdentifier = GlobalTaskIdentifierInSession(session, task);
 	if (error) {
-		os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: Completed with error %{public}@", globalIdentifier, error);
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: Completed with error %{public}@", globalIdentifier, error);
 	} else {
-		os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: Completed without any error", globalIdentifier);
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: Completed without any error", globalIdentifier);
 	}
 
-	static NSString *sRootPath = nil;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		NSFileManager *fileManager = [NSFileManager defaultManager];
-		NSURL *cachesURL = [fileManager URLForDirectory:NSCachesDirectory inDomain:NSUserDomainMask appropriateForURL:nil create:YES error:nil];
-		sRootPath = [[cachesURL path] stringByAppendingPathComponent:@"com.apple.WebKit.Networking"];
-		sRootPath = [sRootPath stringByAppendingPathComponent:@"ch.xxtou.webkitnetworkingdumper"];
-		BOOL sRootCreated = [fileManager createDirectoryAtPath:sRootPath withIntermediateDirectories:YES attributes:nil error:nil];
-		if (!sRootCreated) {
-			os_log_error(OS_LOG_DEFAULT, "WKNetworkSessionDelegate: Failed to create root path %{public}@", sRootPath);
-		} else {
-			os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate: Root path %{public}@", sRootPath);
-		}
-	});
-
-	NSFileManager *fileManager = [NSFileManager defaultManager];
 	NSURL *currentURL = [[task currentRequest] URL];
-	NSString *currentHost = [currentURL host];
-	NSString *hostPath = [sRootPath stringByAppendingPathComponent:currentHost];
-	BOOL sHostCreated = [fileManager createDirectoryAtPath:hostPath withIntermediateDirectories:YES attributes:nil error:nil];
-	if (!sHostCreated) {
-		os_log_error(OS_LOG_DEFAULT, "WKNetworkSessionDelegate: Failed to create host path %{public}@", hostPath);
-	} else {
-		os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate: Host path %{public}@", hostPath);
-	}
-
-	NSString *dumpPath = [currentURL wkSuggestedPathAtRoot:hostPath];
+	NSString *hostPath = HostPathForURL(currentURL);
+	NSString *dumpPath = [currentURL wkSuggestedPathAtRoot:hostPath isRequest:NO];
 
 	pthread_mutex_lock(&mDataPoolMutex);
 	NSMutableData *dataPool = mDataPool[globalIdentifier];
 	if (dataPool) {
 		BOOL dumped = [dataPool writeToFile:dumpPath atomically:YES];
 		if (dumped) {
-			os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: Dumped %lu bytes to %{public}@", globalIdentifier, dataPool.length, dumpPath);
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: Dumped %lu bytes to %{public}@", globalIdentifier, dataPool.length, dumpPath);
 		} else {
-			os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: Failed to dump data to %{public}@", globalIdentifier, dumpPath);
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: Failed to dump data to %{public}@", globalIdentifier, dumpPath);
 		}
 	} else {
-		os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate %{public}@: No data to dump", globalIdentifier);
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[RESP] %{public}@: No data to dump", globalIdentifier);
 	}
 	[mDataPool removeObjectForKey:globalIdentifier];
 	pthread_mutex_unlock(&mDataPoolMutex);
+
+	%orig;
+}
+
+%end
+
+@interface NSURLSessionTask (SPI)
+@property (retain, readonly) NSURLSession *session; 
+@end
+
+%hook NSURLSessionTask
+
+- (void)resume
+{
+	NSString *globalIdentifier = GlobalTaskIdentifierInSession([self session], self);
+	os_log_debug(OS_LOG_DEFAULT, "WKNSD[REQ] %{public}@: Resumed", globalIdentifier);
+
+	NSURLRequest *request = [self currentRequest] ?: [self originalRequest];
+	NSData *requestData = [request HTTPBody];
+	if (!requestData.length) {
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[REQ] %{public}@: No HTTP body", globalIdentifier);
+		%orig;
+		return;
+	}
+
+	NSURL *currentURL = request.URL;
+	if (!currentURL) {
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[REQ] %{public}@: Invalid URL", globalIdentifier);
+		%orig;
+		return;
+	}
+
+	BOOL shouldDump = NO;
+	NSString *httpMethod = [request HTTPMethod];
+	NSString *contentType = [request valueForHTTPHeaderField:@"Content-Type"];
+	contentType = [[contentType componentsSeparatedByString:@";"] firstObject];
+
+	if (!contentType.length)
+		contentType = @"application/octet-stream";
+	
+	pthread_rwlock_rdlock(&mRulesLock);
+	os_log_debug(OS_LOG_DEFAULT, "WKNSD[REQ] %{public}@: Checking %lu rules", globalIdentifier, mRules.count);
+	NSUInteger ruleIndex = 0;
+
+	for (NSDictionary *mRule in mRules) {
+		ruleIndex++;
+
+		if (![mRule isKindOfClass:[NSDictionary class]]) {
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[REQ] %{public}@: Invalid rule #%lu", globalIdentifier, ruleIndex);
+			continue;
+		}
+
+		BOOL isRequest = [mRule[@"request"] isKindOfClass:[NSNumber class]] && [mRule[@"request"] boolValue];
+		if (!isRequest) {
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[REQ] %{public}@: Rule #%lu is not a request rule", globalIdentifier, ruleIndex);
+			continue;
+		}
+
+		BOOL requiresMatches = [mRule[@"matches"] isKindOfClass:[NSArray class]];
+		BOOL requiresMethods = [mRule[@"methods"] isKindOfClass:[NSArray class]];
+		BOOL requiresContentTypes = [mRule[@"contentTypes"] isKindOfClass:[NSArray class]];
+
+		if (!requiresMatches && !requiresMethods && !requiresContentTypes) {
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[REQ] %{public}@: Rule #%lu does not have any requirements", globalIdentifier, ruleIndex);
+			continue;
+		}
+
+		BOOL validMatches = requiresMatches && [currentURL wkRuleMatches:mRule[@"matches"]];
+		BOOL validMethods = requiresMethods && [mRule[@"methods"] containsObject:httpMethod];
+		BOOL validContentTypes = requiresContentTypes && [mRule[@"contentTypes"] containsObject:contentType];
+
+		if (requiresMatches && !validMatches) {
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[REQ] %{public}@: Rule #%lu does not match url %{public}@", globalIdentifier, ruleIndex, currentURL);
+			continue;
+		}
+
+		if (requiresMethods && !validMethods) {
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[REQ] %{public}@: Rule #%lu does not match method %{public}@", globalIdentifier, ruleIndex, httpMethod);
+			continue;
+		}
+
+		if (requiresContentTypes && !validContentTypes) {
+			os_log_debug(OS_LOG_DEFAULT, "WKNSD[REQ] %{public}@: Rule #%lu does not match content type %{public}@", globalIdentifier, ruleIndex, contentType);
+			continue;
+		}
+
+		shouldDump = YES;
+		break;
+	}
+	pthread_rwlock_unlock(&mRulesLock);
+
+	if (!shouldDump) {
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[REQ] %{public}@: No rule matched for url %{public}@ method %{public}@ contentType %{public}@", globalIdentifier, currentURL, httpMethod, contentType);
+		%orig;
+		return;
+	}
+
+	NSString *hostPath = HostPathForURL(currentURL);
+	NSString *dumpPath = [currentURL wkSuggestedPathAtRoot:hostPath isRequest:YES];
+	
+	BOOL dumped = [requestData writeToFile:dumpPath atomically:YES];
+	if (dumped) {
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[REQ] %{public}@: Dumped %lu bytes to %{public}@", globalIdentifier, requestData.length, dumpPath);
+	} else {
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[REQ] %{public}@: Failed to dump data to %{public}@", globalIdentifier, dumpPath);
+	}
 
 	%orig;
 }
@@ -364,9 +478,9 @@ static void LoadRules()
 		if (rules) {
 			[mRules addObjectsFromArray:rules];
 		}
-		os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate: %lu rules loaded", mRules.count);
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[A]: %lu rules loaded", mRules.count);
 	} else {
-		os_log_debug(OS_LOG_DEFAULT, "WKNetworkSessionDelegate: Disabled");
+		os_log_debug(OS_LOG_DEFAULT, "WKNSD[A]: Disabled");
 	}
 	pthread_rwlock_unlock(&mRulesLock);
 }
