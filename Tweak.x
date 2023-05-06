@@ -300,6 +300,16 @@ static NSString *HostPathForURL(NSURL *url)
 		return;
 	}
 
+	NSString *hostPath = HostPathForURL(currentURL);
+	NSString *dumpPath = [currentURL wkSuggestedPathAtRoot:hostPath inSession:globalIdentifier isRequest:NO isHeader:YES];
+	NSDictionary *allHeaders = [(NSHTTPURLResponse *)response allHeaderFields];
+	BOOL dumped = [allHeaders writeToFile:dumpPath atomically:YES];
+	if (dumped) {
+		os_log_debug(mLogger_RESP, "%{public}@: Dumped %lu header enteries to %{public}@", globalIdentifier, allHeaders.count, dumpPath);
+	} else {
+		os_log_debug(mLogger_RESP, "%{public}@: Failed to dump data to %{public}@", globalIdentifier, dumpPath);
+	}
+
 	pthread_mutex_lock(&mDataPoolMutex);
 	NSMutableData *data = [[NSMutableData alloc] init];
 	mDataPool[globalIdentifier] = data;
@@ -381,16 +391,26 @@ static NSString *HostPathForURL(NSURL *url)
 	os_log_debug(mLogger_REQ, "%{public}@: Resumed", globalIdentifier);
 
 	NSURLRequest *request = [self currentRequest] ?: [self originalRequest];
-	NSData *requestData = [request HTTPBody];
-	if (!requestData.length) {
-		os_log_debug(mLogger_REQ, "%{public}@: No HTTP body", globalIdentifier);
+	NSURL *currentURL = request.URL;
+	if (!currentURL) {
+		os_log_debug(mLogger_REQ, "%{public}@: Invalid URL", globalIdentifier);
 		%orig;
 		return;
 	}
 
-	NSURL *currentURL = request.URL;
-	if (!currentURL) {
-		os_log_debug(mLogger_REQ, "%{public}@: Invalid URL", globalIdentifier);
+	NSString *hostPath = HostPathForURL(currentURL);
+	NSString *headerDumpPath = [currentURL wkSuggestedPathAtRoot:hostPath inSession:globalIdentifier isRequest:YES isHeader:YES];
+	NSDictionary *allHeaders = [request allHTTPHeaderFields];
+	BOOL headerDumped = [allHeaders writeToFile:headerDumpPath atomically:YES];
+	if (headerDumped) {
+		os_log_debug(mLogger_REQ, "%{public}@: Dumped %lu header enteries to %{public}@", globalIdentifier, allHeaders.count, headerDumpPath);
+	} else {
+		os_log_debug(mLogger_REQ, "%{public}@: Failed to dump data to %{public}@", globalIdentifier, headerDumpPath);
+	}
+
+	NSData *requestData = [request HTTPBody];
+	if (!requestData.length) {
+		os_log_debug(mLogger_REQ, "%{public}@: No HTTP body", globalIdentifier);
 		%orig;
 		return;
 	}
@@ -460,14 +480,13 @@ static NSString *HostPathForURL(NSURL *url)
 		return;
 	}
 
-	NSString *hostPath = HostPathForURL(currentURL);
-	NSString *dumpPath = [currentURL wkSuggestedPathAtRoot:hostPath inSession:globalIdentifier isRequest:YES isHeader:NO];
+	NSString *bodyDumpPath = [currentURL wkSuggestedPathAtRoot:hostPath inSession:globalIdentifier isRequest:YES isHeader:NO];
 	
-	BOOL dumped = [requestData writeToFile:dumpPath atomically:YES];
-	if (dumped) {
-		os_log_debug(mLogger_REQ, "%{public}@: Dumped %lu bytes to %{public}@", globalIdentifier, requestData.length, dumpPath);
+	BOOL bodyDumped = [requestData writeToFile:bodyDumpPath atomically:YES];
+	if (bodyDumped) {
+		os_log_debug(mLogger_REQ, "%{public}@: Dumped %lu bytes to %{public}@", globalIdentifier, requestData.length, bodyDumpPath);
 	} else {
-		os_log_debug(mLogger_REQ, "%{public}@: Failed to dump data to %{public}@", globalIdentifier, dumpPath);
+		os_log_debug(mLogger_REQ, "%{public}@: Failed to dump data to %{public}@", globalIdentifier, bodyDumpPath);
 	}
 
 	%orig;
