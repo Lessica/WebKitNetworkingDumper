@@ -9,7 +9,7 @@
 - (NSString *)wkValidHost;
 - (NSString *)wkValidPath;
 - (BOOL)wkRuleMatches:(NSArray <NSString *> *)matches;
-- (NSString *)wkSuggestedPathAtRoot:(NSString *)rootPath inSession:(NSString *)sessionID isRequest:(BOOL)isRequest;
+- (NSString *)wkSuggestedPathAtRoot:(NSString *)rootPath inSession:(NSString *)sessionID isRequest:(BOOL)isRequest isHeader:(BOOL)isHeader;
 @end
 
 @implementation NSURL (PrivateMatches)
@@ -143,21 +143,25 @@
 	return validPass;
 }
 
-- (NSString *)wkSuggestedPathAtRoot:(NSString *)rootPath inSession:(NSString *)sessionID isRequest:(BOOL)isRequest
+- (NSString *)wkSuggestedPathAtRoot:(NSString *)rootPath inSession:(NSString *)sessionID isRequest:(BOOL)isRequest isHeader:(BOOL)isHeader
 {
-	NSString *lastPathComponent = [NSString stringWithFormat:@"%@-%@", [[self pathComponents] lastObject], sessionID];
-	if ([[lastPathComponent pathExtension] length] == 0) {
-		lastPathComponent = [lastPathComponent stringByAppendingPathExtension:(isRequest ? @"req" : @"resp")];
-	} else if (isRequest) {
-		lastPathComponent = [lastPathComponent stringByAppendingPathExtension:@"req"];
-	}
+	NSString *lastPathComponent = [[self pathComponents] lastObject];
+	NSString *fullName = [NSString stringWithFormat:
+			@"%@_%@.%@", 
+			lastPathComponent, 
+			sessionID, 
+			(isRequest ? (
+				isHeader ? @"req-header" : @"req"
+			) : (
+				isHeader ? @"resp-header" : @"resp"
+			))];
 	NSFileManager *fileManager = [NSFileManager defaultManager];
-	NSString *fullPath = [rootPath stringByAppendingPathComponent:lastPathComponent];
+	NSString *fullPath = [rootPath stringByAppendingPathComponent:fullName];
 	if (![fileManager fileExistsAtPath:fullPath]) {
 		return fullPath;
 	}
-	NSString *fileName = [lastPathComponent stringByDeletingPathExtension];
-	NSString *extension = [lastPathComponent pathExtension];
+	NSString *fileName = [fullName stringByDeletingPathExtension];
+	NSString *extension = [fullName pathExtension];
 	NSInteger i = 1;
 	do {
 		fullPath = [rootPath stringByAppendingPathComponent:[NSString stringWithFormat:@"%@-%ld.%@", fileName, (long)i++, extension]];
@@ -343,7 +347,7 @@ static NSString *HostPathForURL(NSURL *url)
 
 	NSURL *currentURL = [[task currentRequest] URL];
 	NSString *hostPath = HostPathForURL(currentURL);
-	NSString *dumpPath = [currentURL wkSuggestedPathAtRoot:hostPath inSession:globalIdentifier isRequest:NO];
+	NSString *dumpPath = [currentURL wkSuggestedPathAtRoot:hostPath inSession:globalIdentifier isRequest:NO isHeader:NO];
 
 	pthread_mutex_lock(&mDataPoolMutex);
 	NSMutableData *dataPool = mDataPool[globalIdentifier];
@@ -457,7 +461,7 @@ static NSString *HostPathForURL(NSURL *url)
 	}
 
 	NSString *hostPath = HostPathForURL(currentURL);
-	NSString *dumpPath = [currentURL wkSuggestedPathAtRoot:hostPath inSession:globalIdentifier isRequest:YES];
+	NSString *dumpPath = [currentURL wkSuggestedPathAtRoot:hostPath inSession:globalIdentifier isRequest:YES isHeader:NO];
 	
 	BOOL dumped = [requestData writeToFile:dumpPath atomically:YES];
 	if (dumped) {
