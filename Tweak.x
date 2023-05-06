@@ -151,9 +151,9 @@
 			lastPathComponent, 
 			sessionID, 
 			(isRequest ? (
-				isHeader ? @"req-header" : @"req"
+				isHeader ? @"req-header" : @"req-body"
 			) : (
-				isHeader ? @"resp-header" : @"resp"
+				isHeader ? @"resp-header" : @"resp-body"
 			))];
 	NSFileManager *fileManager = [NSFileManager defaultManager];
 	NSString *fullPath = [rootPath stringByAppendingPathComponent:fullName];
@@ -164,7 +164,7 @@
 	NSString *extension = [fullName pathExtension];
 	NSInteger i = 1;
 	do {
-		fullPath = [rootPath stringByAppendingPathComponent:[NSString stringWithFormat:@"%@-%ld.%@", fileName, (long)i++, extension]];
+		fullPath = [rootPath stringByAppendingPathComponent:[NSString stringWithFormat:@"%@_%ld.%@", fileName, (long)i++, extension]];
 	} while ([fileManager fileExistsAtPath:fullPath]);
 	return fullPath;
 }

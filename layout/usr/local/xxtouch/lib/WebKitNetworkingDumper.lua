@@ -40,14 +40,10 @@ local localized_sort = function (arr)
     end)
     return arr
 end
-local _item_names = function (host, item)
+local _item_names = function (host, item, extension)
     local host_path = _M.host_path(host)
     if file.exists(host_path) ~= "directory" then
         return {}, false
-    end
-    local name, ext
-    if item then
-        name, ext = PATH.splitext(item)
     end
     local _, dir = lfs.dir(host_path)
     local first = false
@@ -57,18 +53,13 @@ local _item_names = function (host, item)
         if not entry then
             break
         end
-        if name and ext then
+        if entry ~= "." and entry ~= ".." then
             local f_name, f_ext = PATH.splitext(entry)
-            if f_name then
-                if f_ext == ext and f_name == name then
-                    first = true
-                end
-                if f_ext == ext and f_name:find(name .. "-", 1, true) == 1 then
+            if not extension or f_ext == extension then
+                if f_name:find(item .. "_", 1, true) == 1 then
                     table.insert(tab, entry)
                 end
             end
-        elseif entry ~= "." and entry ~= ".." then
-            table.insert(tab, entry)
         end
     end
     tab = localized_sort(tab)
@@ -91,9 +82,9 @@ _M.hosts = function ()
     dir:close()
     return tab
 end
-_M.item_paths = function (host, item)
+_M.item_paths = function (host, item, ext)
     local host_path = _M.host_path(host)
-    local tab, first = _item_names(host, item)
+    local tab, first = _item_names(host, item, ext)
     if first then
         table.insert(tab, item)
     end
@@ -103,9 +94,21 @@ _M.item_paths = function (host, item)
     end
     return tabp
 end
-_M.latest_item_path = function (host, item)
+_M.req_header_paths = function (host, item)
+    return _M.item_paths(host, item, ".req-header")
+end
+_M.req_body_paths = function (host, item)
+    return _M.item_paths(host, item, ".req-body")
+end
+_M.resp_header_paths = function (host, item)
+    return _M.item_paths(host, item, ".resp-header")
+end
+_M.resp_body_paths = function (host, item)
+    return _M.item_paths(host, item, ".resp-body")
+end
+_M.latest_item_path = function (host, item, ext)
     local host_path = _M.host_path(host)
-    local tab, first = _item_names(host, item)
+    local tab, first = _item_names(host, item, ext)
     if #tab == 0 and first then
         return host_path .. "/" .. item
     end
@@ -113,5 +116,17 @@ _M.latest_item_path = function (host, item)
         return nil
     end
     return host_path .. "/" .. tab[1]
+end
+_M.latest_req_header_path = function (host, item)
+    return _M.latest_item_path(host, item, ".req-header")
+end
+_M.latest_req_body_path = function (host, item)
+    return _M.latest_item_path(host, item, ".req-body")
+end
+_M.latest_resp_header_path = function (host, item)
+    return _M.latest_item_path(host, item, ".resp-header")
+end
+_M.latest_resp_body_path = function (host, item)
+    return _M.latest_item_path(host, item, ".resp-body")
 end
 return _M
