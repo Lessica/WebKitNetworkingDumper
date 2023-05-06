@@ -9,7 +9,7 @@
 - (NSString *)wkValidHost;
 - (NSString *)wkValidPath;
 - (BOOL)wkRuleMatches:(NSArray <NSString *> *)matches;
-- (NSString *)wkSuggestedPathAtRoot:(NSString *)rootPath isRequest:(BOOL)isRequest;
+- (NSString *)wkSuggestedPathAtRoot:(NSString *)rootPath inSession:(NSString *)sessionID isRequest:(BOOL)isRequest;
 @end
 
 @implementation NSURL (PrivateMatches)
@@ -143,9 +143,9 @@
 	return validPass;
 }
 
-- (NSString *)wkSuggestedPathAtRoot:(NSString *)rootPath isRequest:(BOOL)isRequest
+- (NSString *)wkSuggestedPathAtRoot:(NSString *)rootPath inSession:(NSString *)sessionID isRequest:(BOOL)isRequest
 {
-	NSString *lastPathComponent = [[self pathComponents] lastObject];
+	NSString *lastPathComponent = [NSString stringWithFormat:@"%@-%@", [[self pathComponents] lastObject], sessionID];
 	if ([[lastPathComponent pathExtension] length] == 0) {
 		lastPathComponent = [lastPathComponent stringByAppendingPathExtension:(isRequest ? @"req" : @"resp")];
 	} else if (isRequest) {
@@ -343,7 +343,7 @@ static NSString *HostPathForURL(NSURL *url)
 
 	NSURL *currentURL = [[task currentRequest] URL];
 	NSString *hostPath = HostPathForURL(currentURL);
-	NSString *dumpPath = [currentURL wkSuggestedPathAtRoot:hostPath isRequest:NO];
+	NSString *dumpPath = [currentURL wkSuggestedPathAtRoot:hostPath inSession:globalIdentifier isRequest:NO];
 
 	pthread_mutex_lock(&mDataPoolMutex);
 	NSMutableData *dataPool = mDataPool[globalIdentifier];
@@ -457,7 +457,7 @@ static NSString *HostPathForURL(NSURL *url)
 	}
 
 	NSString *hostPath = HostPathForURL(currentURL);
-	NSString *dumpPath = [currentURL wkSuggestedPathAtRoot:hostPath isRequest:YES];
+	NSString *dumpPath = [currentURL wkSuggestedPathAtRoot:hostPath inSession:globalIdentifier isRequest:YES];
 	
 	BOOL dumped = [requestData writeToFile:dumpPath atomically:YES];
 	if (dumped) {
