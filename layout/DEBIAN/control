@@ -1,6 +1,6 @@
 Package: ch.xxtou.webkitnetworkingdumper
 Name: WebKitNetworkingDumper
-Version: 0.0.3
+Version: 0.0.4
 Architecture: iphoneos-arm
 Description: An awesome MobileSubstrate tweak!
 Maintainer: Rachel

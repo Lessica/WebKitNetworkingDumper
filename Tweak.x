@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <os/log.h>
+#import <os/activity.h>
 #import <pthread.h>
 
 #define PREFS_PATH "/var/mobile/Library/Preferences/ch.xxtou.webkitnetworkingdumper.plist"
@@ -171,6 +172,29 @@
 
 @end
 
+@interface NSData (Private)
+- (NSString *)wkTextRepresentationWithContentType:(NSString *)contentType;
+@end
+
+@implementation NSData (Private)
+
+- (NSString *)wkTextRepresentationWithContentType:(NSString *)contentType
+{
+	contentType = [contentType lowercaseString];
+	if ([contentType hasPrefix:@"text/"]
+		|| [contentType isEqualToString:@"application/x-www-form-urlencoded"]
+		|| [contentType isEqualToString:@"application/json"])
+	{
+		if ([contentType hasSuffix:@"charset=utf-8"])
+		{
+			return [[NSString alloc] initWithData:self encoding:NSUTF8StringEncoding];
+		}
+	}
+	return [self description];
+}
+
+@end
+
 // [
 // 	{
 // 		"matches": ["<all_urls>"],
@@ -186,6 +210,7 @@ static os_log_t mLogger_RESP;
 static NSMutableArray <NSDictionary *> *mRules;
 static pthread_rwlock_t mRulesLock;
 static NSMutableDictionary <NSString *, NSMutableData *> *mDataPool;
+static NSMutableDictionary <NSString *, NSString *> *mDataContentTypes;
 static pthread_mutex_t mDataPoolMutex;
 
 NS_INLINE
@@ -203,22 +228,26 @@ static NSString *HostPathForURL(NSURL *url)
 		NSURL *cachesURL = [fileManager URLForDirectory:NSCachesDirectory inDomain:NSUserDomainMask appropriateForURL:nil create:YES error:nil];
 		sRootPath = [[cachesURL path] stringByAppendingPathComponent:@"com.apple.WebKit.Networking"];
 		sRootPath = [sRootPath stringByAppendingPathComponent:@"ch.xxtou.webkitnetworkingdumper"];
-		BOOL sRootCreated = [fileManager createDirectoryAtPath:sRootPath withIntermediateDirectories:YES attributes:nil error:nil];
+
+		NSError *err = nil;
+		BOOL sRootCreated = [fileManager createDirectoryAtPath:sRootPath withIntermediateDirectories:YES attributes:nil error:&err];
 		if (!sRootCreated) {
-			os_log_error(mLogger_FS, "Failed to create root path %{public}@", sRootPath);
+			os_log_error(mLogger_FS, "Failed to create root path %{public}@, error %{public}@", sRootPath, err);
 		} else {
-			os_log_debug(mLogger_FS, "Root path %{public}@", sRootPath);
+			os_log_info(mLogger_FS, "Root path is: %{public}@", sRootPath);
 		}
 	});
 
 	NSFileManager *fileManager = [NSFileManager defaultManager];
 	NSString *currentHost = [url host];
 	NSString *hostPath = [sRootPath stringByAppendingPathComponent:currentHost];
-	BOOL sHostCreated = [fileManager createDirectoryAtPath:hostPath withIntermediateDirectories:YES attributes:nil error:nil];
+
+	NSError *err = nil;
+	BOOL sHostCreated = [fileManager createDirectoryAtPath:hostPath withIntermediateDirectories:YES attributes:nil error:&err];
 	if (!sHostCreated) {
-		os_log_error(mLogger_FS, "Failed to create host path %{public}@", hostPath);
+		os_log_error(mLogger_FS, "Failed to create host path %{public}@, error %{public}@", hostPath, err);
 	} else {
-		os_log_debug(mLogger_FS, "Host path %{public}@", hostPath);
+		os_log_debug(mLogger_FS, "Host path is: %{public}@", hostPath);
 	}
 
 	return hostPath;
@@ -229,7 +258,7 @@ static NSString *HostPathForURL(NSURL *url)
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition disposition))completionHandler
 {
 	if (!session || !dataTask || ![response isKindOfClass:[NSHTTPURLResponse class]]) {
-		os_log_debug(mLogger_RESP, "Invalid session or response");
+		os_log_fault(mLogger_RESP, "Invalid session or response.");
 		%orig;
 		return;
 	}
@@ -237,27 +266,32 @@ static NSString *HostPathForURL(NSURL *url)
 	NSString *globalIdentifier = GlobalTaskIdentifierInSession(session, dataTask);
 	NSURL *currentURL = response.URL;
 	if (!currentURL) {
-		os_log_debug(mLogger_RESP, "%{public}@: Invalid URL", globalIdentifier);
+		os_log_fault(mLogger_RESP, "%{public}@: Invalid URL.", globalIdentifier);
 		%orig;
 		return;
 	}
 
+	os_activity_t dataActivity = os_activity_create("Data task response received", OS_ACTIVITY_CURRENT, OS_ACTIVITY_FLAG_DEFAULT);
+	struct os_activity_scope_state_s dataActivityScope;
+
+	os_activity_scope_enter(dataActivity, &dataActivityScope);
+
 	BOOL shouldDump = NO;
 	NSInteger statusCode = [(NSHTTPURLResponse *)response statusCode];
-	NSString *contentType = [(NSHTTPURLResponse *)response valueForHTTPHeaderField:@"Content-Type"];
-	contentType = [[contentType componentsSeparatedByString:@";"] firstObject];
+	NSString *rawContentType = [(NSHTTPURLResponse *)response valueForHTTPHeaderField:@"Content-Type"];
+	NSString *contentType = [[rawContentType componentsSeparatedByString:@";"] firstObject];
 
 	if (!contentType.length)
 		contentType = @"application/octet-stream";
 
 	pthread_rwlock_rdlock(&mRulesLock);
-	os_log_debug(mLogger_RESP, "%{public}@: Checking %lu rules", globalIdentifier, mRules.count);
+	os_log_debug(mLogger_RESP, "%{public}@: Checking %lu rules.", globalIdentifier, mRules.count);
 	NSUInteger ruleIndex = 0;
 	for (NSDictionary *mRule in mRules) {
 		ruleIndex++;
 
 		if (![mRule isKindOfClass:[NSDictionary class]]) {
-			os_log_debug(mLogger_RESP, "%{public}@: Invalid rule #%lu", globalIdentifier, ruleIndex);
+			os_log_error(mLogger_RESP, "%{public}@: Invalid rule #%lu.", globalIdentifier, ruleIndex);
 			continue;
 		}
 
@@ -266,7 +300,7 @@ static NSString *HostPathForURL(NSURL *url)
 		BOOL requiresContentTypes = [mRule[@"contentTypes"] isKindOfClass:[NSArray class]];
 
 		if (!requiresMatches && !requiresStatusCodes && !requiresContentTypes) {
-			os_log_debug(mLogger_RESP, "%{public}@: Rule #%lu does not have any requirements", globalIdentifier, ruleIndex);
+			os_log_error(mLogger_RESP, "%{public}@: Rule #%lu does not have any requirements, you must provide one of the following requirements: matches, statusCodes or contentTypes.", globalIdentifier, ruleIndex);
 			continue;
 		}
 
@@ -295,9 +329,12 @@ static NSString *HostPathForURL(NSURL *url)
 	pthread_rwlock_unlock(&mRulesLock);
 
 	if (!shouldDump) {
-		os_log_debug(mLogger_RESP, "%{public}@: No rule matched for url %{public}@ statusCode %ld contentType %{public}@", globalIdentifier, currentURL, statusCode, contentType);
+		os_log_info(mLogger_RESP, "%{public}@: No rule matched for statusCode %ld contentType %{public}@ url %{public}@", globalIdentifier, statusCode, contentType, currentURL);
 		%orig;
+		os_activity_scope_leave(&dataActivityScope);
 		return;
+	} else {
+		os_log_info(mLogger_RESP, "%{public}@: Rule #%lu matched for statusCode %ld contentType %{public}@ url %{public}@", globalIdentifier, ruleIndex, statusCode, contentType, currentURL);
 	}
 
 	NSString *hostPath = HostPathForURL(currentURL);
@@ -305,55 +342,66 @@ static NSString *HostPathForURL(NSURL *url)
 	NSDictionary *allHeaders = [(NSHTTPURLResponse *)response allHeaderFields];
 	BOOL dumped = [allHeaders writeToFile:dumpPath atomically:YES];
 	if (dumped) {
-		os_log_debug(mLogger_RESP, "%{public}@: Dumped %lu header enteries to %{public}@", globalIdentifier, allHeaders.count, dumpPath);
+		os_log_info(mLogger_RESP, "%{public}@: Headers received, dumped %lu enteries to %{public}@\n%{public}@", globalIdentifier, allHeaders.count, dumpPath, allHeaders);
 	} else {
-		os_log_debug(mLogger_RESP, "%{public}@: Failed to dump data to %{public}@", globalIdentifier, dumpPath);
+		os_log_error(mLogger_RESP, "%{public}@: Failed to dump headers to %{public}@\n%{public}@", globalIdentifier, dumpPath, allHeaders);
 	}
 
 	pthread_mutex_lock(&mDataPoolMutex);
 	NSMutableData *data = [[NSMutableData alloc] init];
 	mDataPool[globalIdentifier] = data;
+	mDataContentTypes[globalIdentifier] = rawContentType;
 	os_log_debug(mLogger_RESP, "%{public}@: Begin dumping data for url %{public}@", globalIdentifier, currentURL);
 	pthread_mutex_unlock(&mDataPoolMutex);
 
 	%orig;
+	os_activity_scope_leave(&dataActivityScope);
 }
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data
 {
 	if (!session || !dataTask) {
-		os_log_debug(mLogger_RESP, "Invalid session");
+		os_log_fault(mLogger_RESP, "Invalid session.");
 		%orig;
 		return;
 	}
 
 	NSString *globalIdentifier = GlobalTaskIdentifierInSession(session, dataTask);
 
+	os_activity_t dataActivity = os_activity_create("Data task data received", OS_ACTIVITY_CURRENT, OS_ACTIVITY_FLAG_DEFAULT);
+	struct os_activity_scope_state_s dataActivityScope;
+
+	os_activity_scope_enter(dataActivity, &dataActivityScope);
+
 	pthread_mutex_lock(&mDataPoolMutex);
 	NSMutableData *dataPool = mDataPool[globalIdentifier];
 	if (dataPool) {
 		[dataPool appendData:data];
-		os_log_debug(mLogger_RESP, "%{public}@: Received %lu bytes, %lu bytes in total", globalIdentifier, data.length, dataPool.length);
+		os_log_debug(mLogger_RESP, "%{public}@: Received %lu bytes, %lu bytes in total.", globalIdentifier, data.length, dataPool.length);
 	}
 	pthread_mutex_unlock(&mDataPoolMutex);
 
 	%orig;
+	os_activity_scope_leave(&dataActivityScope);
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error
 {
 	if (!session || !task) {
-		os_log_debug(mLogger_RESP, "Invalid session");
+		os_log_error(mLogger_RESP, "Invalid session.");
 		%orig;
 		return;
 	}
 
 	NSString *globalIdentifier = GlobalTaskIdentifierInSession(session, task);
 	if (error) {
-		os_log_debug(mLogger_RESP, "%{public}@: Completed with error %{public}@", globalIdentifier, error);
-	} else {
-		os_log_debug(mLogger_RESP, "%{public}@: Completed without any error", globalIdentifier);
+		os_log_error(mLogger_RESP, "%{public}@: Completed with error %{public}@", globalIdentifier, error);
 	}
+
+	os_activity_t dataActivity = os_activity_create("Data task completed", OS_ACTIVITY_CURRENT, OS_ACTIVITY_FLAG_DEFAULT);
+	struct os_activity_scope_state_s dataActivityScope;
+
+	os_activity_scope_enter(dataActivity, &dataActivityScope);
 
 	NSURL *currentURL = [[task currentRequest] URL];
 	NSString *hostPath = HostPathForURL(currentURL);
@@ -361,20 +409,23 @@ static NSString *HostPathForURL(NSURL *url)
 
 	pthread_mutex_lock(&mDataPoolMutex);
 	NSMutableData *dataPool = mDataPool[globalIdentifier];
-	if (dataPool) {
+	NSString *contentType = mDataContentTypes[globalIdentifier];
+	if (dataPool.length) {
 		BOOL dumped = [dataPool writeToFile:dumpPath atomically:YES];
 		if (dumped) {
-			os_log_debug(mLogger_RESP, "%{public}@: Dumped %lu bytes to %{public}@", globalIdentifier, dataPool.length, dumpPath);
+			os_log_info(mLogger_RESP, "%{public}@: Task completed, dumped %lu bytes to %{public}@\n%{public}@", globalIdentifier, dataPool.length, dumpPath, [dataPool wkTextRepresentationWithContentType:contentType]);
 		} else {
-			os_log_debug(mLogger_RESP, "%{public}@: Failed to dump data to %{public}@", globalIdentifier, dumpPath);
+			os_log_error(mLogger_RESP, "%{public}@: Failed to dump data to %{public}@\n%{public}@", globalIdentifier, dumpPath, [dataPool wkTextRepresentationWithContentType:contentType]);
 		}
 	} else {
-		os_log_debug(mLogger_RESP, "%{public}@: No data to dump", globalIdentifier);
+		os_log_info(mLogger_RESP, "%{public}@: Task completed, no data to dump.", globalIdentifier);
 	}
 	[mDataPool removeObjectForKey:globalIdentifier];
+	[mDataContentTypes removeObjectForKey:globalIdentifier];
 	pthread_mutex_unlock(&mDataPoolMutex);
 
 	%orig;
+	os_activity_scope_leave(&dataActivityScope);
 }
 
 %end
@@ -388,32 +439,18 @@ static NSString *HostPathForURL(NSURL *url)
 - (void)resume
 {
 	NSString *globalIdentifier = GlobalTaskIdentifierInSession([self session], self);
-	os_log_debug(mLogger_REQ, "%{public}@: Resumed", globalIdentifier);
-
 	NSURLRequest *request = [self currentRequest] ?: [self originalRequest];
 	NSURL *currentURL = request.URL;
 	if (!currentURL) {
-		os_log_debug(mLogger_REQ, "%{public}@: Invalid URL", globalIdentifier);
+		os_log_error(mLogger_REQ, "%{public}@: Invalid URL.", globalIdentifier);
 		%orig;
 		return;
 	}
 
-	NSString *hostPath = HostPathForURL(currentURL);
-	NSString *headerDumpPath = [currentURL wkSuggestedPathAtRoot:hostPath inSession:globalIdentifier isRequest:YES isHeader:YES];
-	NSDictionary *allHeaders = [request allHTTPHeaderFields];
-	BOOL headerDumped = [allHeaders writeToFile:headerDumpPath atomically:YES];
-	if (headerDumped) {
-		os_log_debug(mLogger_REQ, "%{public}@: Dumped %lu header enteries to %{public}@", globalIdentifier, allHeaders.count, headerDumpPath);
-	} else {
-		os_log_debug(mLogger_REQ, "%{public}@: Failed to dump data to %{public}@", globalIdentifier, headerDumpPath);
-	}
+	os_activity_t dataActivity = os_activity_create("Data task resumed", OS_ACTIVITY_CURRENT, OS_ACTIVITY_FLAG_DEFAULT);
+	struct os_activity_scope_state_s dataActivityScope;
 
-	NSData *requestData = [request HTTPBody];
-	if (!requestData.length) {
-		os_log_debug(mLogger_REQ, "%{public}@: No HTTP body", globalIdentifier);
-		%orig;
-		return;
-	}
+	os_activity_scope_enter(dataActivity, &dataActivityScope);
 
 	BOOL shouldDump = NO;
 	NSString *httpMethod = [request HTTPMethod];
@@ -424,20 +461,20 @@ static NSString *HostPathForURL(NSURL *url)
 		contentType = @"application/octet-stream";
 	
 	pthread_rwlock_rdlock(&mRulesLock);
-	os_log_debug(mLogger_REQ, "%{public}@: Checking %lu rules", globalIdentifier, mRules.count);
+	os_log_debug(mLogger_REQ, "%{public}@: Checking %lu rules.", globalIdentifier, mRules.count);
 	NSUInteger ruleIndex = 0;
 
 	for (NSDictionary *mRule in mRules) {
 		ruleIndex++;
 
 		if (![mRule isKindOfClass:[NSDictionary class]]) {
-			os_log_debug(mLogger_REQ, "%{public}@: Invalid rule #%lu", globalIdentifier, ruleIndex);
+			os_log_error(mLogger_REQ, "%{public}@: Invalid rule #%lu.", globalIdentifier, ruleIndex);
 			continue;
 		}
 
 		BOOL isRequest = [mRule[@"request"] isKindOfClass:[NSNumber class]] && [mRule[@"request"] boolValue];
 		if (!isRequest) {
-			os_log_debug(mLogger_REQ, "%{public}@: Rule #%lu is not a request rule", globalIdentifier, ruleIndex);
+			os_log_debug(mLogger_REQ, "%{public}@: Rule #%lu is not a request rule.", globalIdentifier, ruleIndex);
 			continue;
 		}
 
@@ -446,7 +483,7 @@ static NSString *HostPathForURL(NSURL *url)
 		BOOL requiresContentTypes = [mRule[@"contentTypes"] isKindOfClass:[NSArray class]];
 
 		if (!requiresMatches && !requiresMethods && !requiresContentTypes) {
-			os_log_debug(mLogger_REQ, "%{public}@: Rule #%lu does not have any requirements", globalIdentifier, ruleIndex);
+			os_log_error(mLogger_REQ, "%{public}@: Rule #%lu does not have any requirements, you must provide one of the following requirements: matches, methods or contentTypes.", globalIdentifier, ruleIndex);
 			continue;
 		}
 
@@ -475,8 +512,29 @@ static NSString *HostPathForURL(NSURL *url)
 	pthread_rwlock_unlock(&mRulesLock);
 
 	if (!shouldDump) {
-		os_log_debug(mLogger_REQ, "%{public}@: No rule matched for url %{public}@ method %{public}@ contentType %{public}@", globalIdentifier, currentURL, httpMethod, contentType);
+		os_log_info(mLogger_REQ, "%{public}@: No rule matched for method %{public}@ contentType %{public}@ url %{public}@", globalIdentifier, httpMethod, contentType, currentURL);
 		%orig;
+		os_activity_scope_leave(&dataActivityScope);
+		return;
+	} else {
+		os_log_info(mLogger_RESP, "%{public}@: Rule #%lu matched for method %{public}@ contentType %{public}@ url %{public}@", globalIdentifier, ruleIndex, httpMethod, contentType, currentURL);
+	}
+
+	NSString *hostPath = HostPathForURL(currentURL);
+	NSString *headerDumpPath = [currentURL wkSuggestedPathAtRoot:hostPath inSession:globalIdentifier isRequest:YES isHeader:YES];
+	NSDictionary *allHeaders = [request allHTTPHeaderFields];
+	BOOL headerDumped = [allHeaders writeToFile:headerDumpPath atomically:YES];
+	if (headerDumped) {
+		os_log_info(mLogger_REQ, "%{public}@: Headers fulfilled, dumped %lu enteries to %{public}@\n%{public}@", globalIdentifier, allHeaders.count, headerDumpPath, allHeaders);
+	} else {
+		os_log_error(mLogger_REQ, "%{public}@: Failed to dump headers to %{public}@\n%{public}@", globalIdentifier, headerDumpPath, allHeaders);
+	}
+
+	NSData *requestData = [request HTTPBody];
+	if (!requestData.length) {
+		os_log_info(mLogger_REQ, "%{public}@: Task resumed, but no HTTP body to send.", globalIdentifier);
+		%orig;
+		os_activity_scope_leave(&dataActivityScope);
 		return;
 	}
 
@@ -484,12 +542,13 @@ static NSString *HostPathForURL(NSURL *url)
 	
 	BOOL bodyDumped = [requestData writeToFile:bodyDumpPath atomically:YES];
 	if (bodyDumped) {
-		os_log_debug(mLogger_REQ, "%{public}@: Dumped %lu bytes to %{public}@", globalIdentifier, requestData.length, bodyDumpPath);
+		os_log_info(mLogger_REQ, "%{public}@: HTTP body fulfilled, dumped %lu bytes to %{public}@", globalIdentifier, requestData.length, bodyDumpPath);
 	} else {
-		os_log_debug(mLogger_REQ, "%{public}@: Failed to dump data to %{public}@", globalIdentifier, bodyDumpPath);
+		os_log_error(mLogger_REQ, "%{public}@: Failed to dump data to %{public}@", globalIdentifier, bodyDumpPath);
 	}
 
 	%orig;
+	os_activity_scope_leave(&dataActivityScope);
 }
 
 %end
@@ -505,9 +564,9 @@ static void LoadRules()
 		if (rules) {
 			[mRules addObjectsFromArray:rules];
 		}
-		os_log_debug(mLogger_A, "%lu rules loaded", mRules.count);
+		os_log_info(mLogger_A, "%lu rules loaded.", mRules.count);
 	} else {
-		os_log_debug(mLogger_A, "Disabled");
+		os_log_info(mLogger_A, "Tweak is disabled.");
 	}
 	pthread_rwlock_unlock(&mRulesLock);
 }
@@ -522,6 +581,7 @@ static void LoadRules()
 	pthread_rwlock_init(&mRulesLock, NULL);
 
 	mDataPool = [[NSMutableDictionary alloc] init];
+	mDataContentTypes = [[NSMutableDictionary alloc] init];
 	pthread_mutex_init(&mDataPoolMutex, NULL);
 
 	LoadRules();

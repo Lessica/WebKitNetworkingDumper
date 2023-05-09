@@ -41,6 +41,7 @@ local localized_sort = function (arr)
     return arr
 end
 local _item_names = function (host, item, extension)
+    item = item or ""
     local host_path = _M.host_path(host)
     if file.exists(host_path) ~= "directory" then
         return {}, false
