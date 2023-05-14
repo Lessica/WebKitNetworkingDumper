@@ -207,6 +207,8 @@ static os_log_t mLogger_A;
 static os_log_t mLogger_FS;
 static os_log_t mLogger_REQ;
 static os_log_t mLogger_RESP;
+
+static BOOL mEnabled = NO;
 static NSMutableArray <NSDictionary *> *mRules;
 static pthread_rwlock_t mRulesLock;
 static NSMutableDictionary <NSString *, NSMutableData *> *mDataPool;
@@ -257,6 +259,11 @@ static NSString *HostPathForURL(NSURL *url)
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition disposition))completionHandler
 {
+	if (!mEnabled) {
+		%orig;
+		return;
+	}
+
 	if (!session || !dataTask || ![response isKindOfClass:[NSHTTPURLResponse class]]) {
 		os_log_fault(mLogger_RESP, "Invalid session or response.");
 		%orig;
@@ -360,6 +367,11 @@ static NSString *HostPathForURL(NSURL *url)
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data
 {
+	if (!mEnabled) {
+		%orig;
+		return;
+	}
+
 	if (!session || !dataTask) {
 		os_log_fault(mLogger_RESP, "Invalid session.");
 		%orig;
@@ -387,6 +399,11 @@ static NSString *HostPathForURL(NSURL *url)
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error
 {
+	if (!mEnabled) {
+		%orig;
+		return;
+	}
+
 	if (!session || !task) {
 		os_log_error(mLogger_RESP, "Invalid session.");
 		%orig;
@@ -438,6 +455,11 @@ static NSString *HostPathForURL(NSURL *url)
 
 - (void)resume
 {
+	if (!mEnabled) {
+		%orig;
+		return;
+	}
+
 	NSString *globalIdentifier = GlobalTaskIdentifierInSession([self session], self);
 	NSURLRequest *request = [self currentRequest] ?: [self originalRequest];
 	NSURL *currentURL = request.URL;
@@ -555,11 +577,12 @@ static NSString *HostPathForURL(NSURL *url)
 
 static void LoadRules()
 {
+	BOOL priorEnabled = mEnabled;
 	pthread_rwlock_wrlock(&mRulesLock);
 	[mRules removeAllObjects];
 	NSDictionary <NSString *, id> *prefs = [NSDictionary dictionaryWithContentsOfFile:@PREFS_PATH];
-	BOOL enabled = [prefs[@"enabled"] boolValue];
-	if (enabled) {
+	mEnabled = [prefs[@"enabled"] boolValue];
+	if (mEnabled) {
 		NSArray <NSDictionary *> *rules = prefs[@"rules"];
 		if (rules) {
 			[mRules addObjectsFromArray:rules];
@@ -569,6 +592,13 @@ static void LoadRules()
 		os_log_info(mLogger_A, "Tweak is disabled.");
 	}
 	pthread_rwlock_unlock(&mRulesLock);
+	if (priorEnabled != mEnabled) {
+		os_log_info(mLogger_A, "Tweak enabled status changed, clearing data pool.");
+		pthread_mutex_lock(&mDataPoolMutex);
+		[mDataPool removeAllObjects];
+		[mDataContentTypes removeAllObjects];
+		pthread_mutex_unlock(&mDataPoolMutex);
+	}
 }
 
 %ctor {
