@@ -1,9 +1,11 @@
 local _M = {}
 local lfs = require("lfs")
+local posix = require("posix")
 local PATH = require("path")
 _M.apply = function (rules)
     rules = rules or {}
     local succeed = plist.write("/var/mobile/Library/Preferences/ch.xxtou.webkitnetworkingdumper.plist", rules)
+    posix.chown("/var/mobile/Library/Preferences/ch.xxtou.webkitnetworkingdumper.plist", 501, 501)
     notify_post("ch.xxtou.webkitnetworkingdumper/ReloadRules")
     return succeed
 end
