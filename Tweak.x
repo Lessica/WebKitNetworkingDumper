@@ -255,6 +255,12 @@ static NSString *HostPathForURL(NSURL *url)
 	return hostPath;
 }
 
+@class NetworkDataTaskCocoa;
+
+@interface WKNetworkSessionDelegate (WebKitInternal)
+- (NetworkDataTaskCocoa *)existingTask:(NSURLSessionTask *)task;
+@end
+
 %hook WKNetworkSessionDelegate
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition disposition))completionHandler
